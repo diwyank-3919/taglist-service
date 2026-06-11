@@ -141,14 +141,20 @@ async function handleExtract(req, res) {
     }
 
     return res.json({ success: true, selector, mode, data: result.trim() });
-  } catch (err) {
-    // If session may have expired, reset login state so next request re-logs in
-    if (err.message.includes('session') || err.message.includes('login')) {
-      isLoggedIn = false;
+ } catch (err) {
+    isLoggedIn = false;
+    if (browserPromise) {
+      const browser = await browserPromise;
+      await browser.close();
     }
+    browserPromise = null;
     return res.status(500).json({ success: false, error: err.message });
   } finally {
-    if (page) await page.close();
+    try {
+      if (page) await page.close();
+    } catch (_) {
+      // page already closed if browser was reset
+    }
   }
 }
 
