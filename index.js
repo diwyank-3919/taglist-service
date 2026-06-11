@@ -48,12 +48,11 @@ async function ensureLoggedIn(browser) {
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     );
     await page.setViewport({ width: 1366, height: 900 });
-
-    // Block resources during login too for speed
     await blockResources(page);
 
+    console.log('Navigating to GMATClub login page...');
     await page.goto('https://gmatclub.com/forum/ucp.php?mode=login', {
-      waitUntil: 'domcontentloaded',  // faster than networkidle2
+      waitUntil: 'domcontentloaded',
       timeout: 90000,
     });
 
@@ -66,7 +65,6 @@ async function ensureLoggedIn(browser) {
       page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 90000 }),
     ]);
 
-    // Verify login succeeded
     const loggedIn = await page.evaluate(() => {
       return !document.querySelector('input[name="username"]');
     });
@@ -82,6 +80,15 @@ async function ensureLoggedIn(browser) {
   }
 }
 
+/**
+ * GET or POST /extract
+ * Query/body params:
+ *   url       (required) - page to load
+ *   selector  (optional) - CSS selector to extract, default "#taglist"
+ *   mode      (optional) - "innerText" | "innerHTML" | "outerHTML" | "html" (full page), default "innerText"
+ *   waitFor   (optional) - extra ms to wait after selector appears (default 0)
+ *   timeout   (optional) - max ms to wait for selector (default 30000)
+ */
 async function handleExtract(req, res) {
   const params = { ...req.query, ...req.body };
   const {
@@ -108,15 +115,18 @@ async function handleExtract(req, res) {
     await page.setViewport({ width: 1366, height: 900 });
     await blockResources(page);
 
+    console.log(`Navigating to: ${url}`);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90000 });
 
     if (mode === 'html') {
       const html = await page.content();
-      console.log('Contains taglist:', html.includes('taglist'));
+      console.log(`Returned full HTML for: ${url}`);
       return res.json({ success: true, html });
     }
 
+    console.log(`Waiting for selector: ${selector}`);
     await page.waitForSelector(selector, { timeout: parseInt(timeout, 10) });
+    console.log(`Found selector: ${selector}`);
 
     const extraWait = parseInt(waitFor, 10);
     if (extraWait > 0) {
@@ -136,14 +146,17 @@ async function handleExtract(req, res) {
     );
 
     if (result === null) {
+      console.log(`Selector "${selector}" not found on page: ${url}`);
       return res.status(404).json({
         success: false,
         error: `Selector "${selector}" not found on page`,
       });
     }
 
+    console.log(`Extracted ${result.length} chars from "${selector}" on: ${url}`);
     return res.json({ success: true, selector, mode, data: result.trim() });
   } catch (err) {
+    console.error(`Error extracting ${url}:`, err.message);
     isLoggedIn = false;
     if (browserPromise) {
       const browser = await browserPromise;
