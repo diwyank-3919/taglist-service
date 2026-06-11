@@ -50,7 +50,7 @@ async function ensureLoggedIn(browser) {
 
     await Promise.all([
       page.click('input[type="submit"]'),
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 60000 }),
+      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 90000 }),
     ]);
 
     // Verify login succeeded by checking for a logged-in indicator
@@ -104,8 +104,16 @@ async function handleExtract(req, res) {
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     );
     await page.setViewport({ width: 1366, height: 900 });
+    await page.setRequestInterception(true);
+page.on('request', (req) => {
+  if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
+    req.abort();
+  } else {
+    req.continue();
+  }
+});
 
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 90000 });
 
     if (mode === 'html') {
       const html = await page.content();
