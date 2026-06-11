@@ -98,6 +98,10 @@ async function handleExtract(req, res) {
   }
 }
 
+app.get('/', (req, res) => {
+  res.send('Taglist service is running!');
+});
+
 app.get('/extract', handleExtract);
 app.post('/extract', handleExtract);
 
