@@ -1,13 +1,16 @@
 const express = require('express');
 const puppeteer = require('puppeteer');
 
+const USERNAME = process.env.GMATCLUB_USERNAME;
+const PASSWORD = process.env.GMATCLUB_PASSWORD;
+
 const app = express();
 app.use(express.json());
-
 const PORT = process.env.PORT || 3000;
 
 // Reuse a single browser instance across requests for performance
 let browserPromise = null;
+
 function getBrowser() {
   if (!browserPromise) {
     browserPromise = puppeteer.launch({
@@ -23,6 +26,49 @@ function getBrowser() {
   return browserPromise;
 }
 
+// Track login state so we don't re-login on every request
+let isLoggedIn = false;
+
+async function ensureLoggedIn(browser) {
+  if (isLoggedIn) return;
+
+  const page = await browser.newPage();
+  try {
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    );
+    await page.setViewport({ width: 1366, height: 900 });
+
+    await page.goto('https://gmatclub.com/forum/ucp.php?mode=login', {
+      waitUntil: 'networkidle2',
+      timeout: 60000,
+    });
+
+    await page.waitForSelector('input[name="username"]');
+    await page.type('input[name="username"]', USERNAME);
+    await page.type('input[name="password"]', PASSWORD);
+
+    await Promise.all([
+      page.click('input[type="submit"]'),
+      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 60000 }),
+    ]);
+
+    // Verify login succeeded by checking for a logged-in indicator
+    const loggedIn = await page.evaluate(() => {
+      return !document.querySelector('input[name="username"]');
+    });
+
+    if (!loggedIn) {
+      throw new Error('Login failed — check GMATCLUB_USERNAME and GMATCLUB_PASSWORD env vars');
+    }
+
+    isLoggedIn = true;
+    console.log('Successfully logged in to GMATClub');
+  } finally {
+    await page.close();
+  }
+}
+
 /**
  * GET or POST /extract
  * Query/body params:
@@ -30,7 +76,7 @@ function getBrowser() {
  *   selector  (optional) - CSS selector to extract, default "#taglist"
  *   mode      (optional) - "innerText" | "innerHTML" | "outerHTML" | "html" (full page), default "innerText"
  *   waitFor   (optional) - extra ms to wait after selector appears (default 0)
- *   timeout   (optional) - max ms to wait for selector (default 15000)
+ *   timeout   (optional) - max ms to wait for selector (default 30000)
  */
 async function handleExtract(req, res) {
   const params = { ...req.query, ...req.body };
@@ -39,7 +85,7 @@ async function handleExtract(req, res) {
     selector = '#taglist',
     mode = 'innerText',
     waitFor = '0',
-    timeout = '15000',
+    timeout = '30000',
   } = params;
 
   if (!url) {
@@ -49,8 +95,11 @@ async function handleExtract(req, res) {
   let page;
   try {
     const browser = await getBrowser();
-    page = await browser.newPage();
 
+    // Ensure we are logged in (only logs in once, reuses session)
+    await ensureLoggedIn(browser);
+
+    page = await browser.newPage();
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     );
@@ -60,10 +109,11 @@ async function handleExtract(req, res) {
 
     if (mode === 'html') {
       const html = await page.content();
+      console.log('Contains taglist:', html.includes('taglist'));
       return res.json({ success: true, html });
     }
 
-    // Wait for the target selector to appear (data is JS-injected)
+    // Wait for the target selector to appear
     await page.waitForSelector(selector, { timeout: parseInt(timeout, 10) });
 
     const extraWait = parseInt(waitFor, 10);
@@ -92,6 +142,10 @@ async function handleExtract(req, res) {
 
     return res.json({ success: true, selector, mode, data: result.trim() });
   } catch (err) {
+    // If session may have expired, reset login state so next request re-logs in
+    if (err.message.includes('session') || err.message.includes('login')) {
+      isLoggedIn = false;
+    }
     return res.status(500).json({ success: false, error: err.message });
   } finally {
     if (page) await page.close();
