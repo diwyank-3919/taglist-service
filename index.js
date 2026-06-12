@@ -1,9 +1,6 @@
 const express = require('express');
 const puppeteer = require('puppeteer');
 
-const USERNAME = process.env.GMATCLUB_USERNAME;
-const PASSWORD = process.env.GMATCLUB_PASSWORD;
-
 const app = express();
 app.use(express.json());
 const PORT = process.env.PORT || 3000;
@@ -25,8 +22,6 @@ function getBrowser() {
   return browserPromise;
 }
 
-let isLoggedIn = false;
-
 // Block images/fonts/css to speed up page loads
 async function blockResources(page) {
   await page.setRequestInterception(true);
@@ -39,47 +34,6 @@ async function blockResources(page) {
   });
 }
 
-async function ensureLoggedIn(browser) {
-  if (isLoggedIn) return;
-
-  const page = await browser.newPage();
-  try {
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-    );
-    await page.setViewport({ width: 1366, height: 900 });
-    await blockResources(page);
-
-    console.log('Navigating to GMATClub login page...');
-    await page.goto('https://gmatclub.com/forum/ucp.php?mode=login', {
-      waitUntil: 'domcontentloaded',
-      timeout: 90000,
-    });
-
-    await page.waitForSelector('input[name="username"]', { timeout: 30000 });
-    await page.type('input[name="username"]', USERNAME);
-    await page.type('input[name="password"]', PASSWORD);
-
-    await Promise.all([
-      page.click('input[type="submit"]'),
-      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 90000 }),
-    ]);
-
-    const loggedIn = await page.evaluate(() => {
-      return !document.querySelector('input[name="username"]');
-    });
-
-    if (!loggedIn) {
-      throw new Error('Login failed — check GMATCLUB_USERNAME and GMATCLUB_PASSWORD env vars');
-    }
-
-    isLoggedIn = true;
-    console.log('Successfully logged in to GMATClub');
-  } finally {
-    await page.close();
-  }
-}
-
 /**
  * GET or POST /extract
  * Query/body params:
@@ -88,6 +42,7 @@ async function ensureLoggedIn(browser) {
  *   mode      (optional) - "innerText" | "innerHTML" | "outerHTML" | "html" (full page), default "innerText"
  *   waitFor   (optional) - extra ms to wait after selector appears (default 0)
  *   timeout   (optional) - max ms to wait for selector (default 30000)
+ *   cookie    (optional) - raw cookie header string to set on the page (for authenticated sessions)
  */
 async function handleExtract(req, res) {
   const params = { ...req.query, ...req.body };
@@ -97,6 +52,7 @@ async function handleExtract(req, res) {
     mode = 'innerText',
     waitFor = '0',
     timeout = '30000',
+    cookie,
   } = params;
 
   if (!url) {
@@ -106,7 +62,6 @@ async function handleExtract(req, res) {
   let page;
   try {
     const browser = await getBrowser();
-    await ensureLoggedIn(browser);
 
     page = await browser.newPage();
     await page.setUserAgent(
@@ -114,6 +69,24 @@ async function handleExtract(req, res) {
     );
     await page.setViewport({ width: 1366, height: 900 });
     await blockResources(page);
+
+    // If a cookie string is provided, apply it before navigating
+    if (cookie) {
+      const targetUrl = new URL(url);
+      const cookiePairs = cookie.split(';').map((c) => c.trim()).filter(Boolean);
+      const cookieObjects = cookiePairs.map((pair) => {
+        const idx = pair.indexOf('=');
+        const name = pair.slice(0, idx);
+        const value = pair.slice(idx + 1);
+        return {
+          name,
+          value,
+          domain: targetUrl.hostname,
+          path: '/',
+        };
+      });
+      await page.setCookie(...cookieObjects);
+    }
 
     console.log(`Navigating to: ${url}`);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90000 });
@@ -157,7 +130,6 @@ async function handleExtract(req, res) {
     return res.json({ success: true, selector, mode, data: result.trim() });
   } catch (err) {
     console.error(`Error extracting ${url}:`, err.message);
-    isLoggedIn = false;
     if (browserPromise) {
       const browser = await browserPromise;
       await browser.close();
