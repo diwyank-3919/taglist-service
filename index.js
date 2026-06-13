@@ -1,5 +1,8 @@
 const express = require('express');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+
+puppeteer.use(StealthPlugin());
 
 const app = express();
 app.use(express.json());
@@ -16,13 +19,15 @@ function getBrowser() {
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
+        '--disable-blink-features=AutomationControlled',
+        '--window-size=1366,900',
       ],
     });
   }
   return browserPromise;
 }
 
-// Block images/fonts/css to speed up page loads
+// Block images/fonts/css to speed up page loads (optional)
 async function blockResources(page) {
   await page.setRequestInterception(true);
   page.on('request', (req) => {
@@ -37,12 +42,14 @@ async function blockResources(page) {
 /**
  * GET or POST /extract
  * Query/body params:
- *   url       (required) - page to load
- *   selector  (optional) - CSS selector to extract, default "#taglist"
- *   mode      (optional) - "innerText" | "innerHTML" | "outerHTML" | "html" (full page), default "innerText"
- *   waitFor   (optional) - extra ms to wait after selector appears (default 0)
- *   timeout   (optional) - max ms to wait for selector (default 30000)
- *   cookie    (optional) - raw cookie header string to set on the page (for authenticated sessions)
+ *   url          (required) - page to load
+ *   selector     (optional) - CSS selector to extract, default "#taglist"
+ *   mode         (optional) - "innerText" | "innerHTML" | "outerHTML" | "html" (full page), default "innerText"
+ *   waitFor      (optional) - extra ms to wait after selector appears (default 0)
+ *   timeout      (optional) - max ms to wait for selector (default 30000)
+ *   cookie       (optional) - raw cookie string to inject into Puppeteer (e.g. "name=value; name2=value2")
+ *   blockAssets  (optional) - "true" | "false" — whether to block images/css/fonts (default "false")
+ *   waitUntil    (optional) - Puppeteer waitUntil strategy: "domcontentloaded" | "networkidle2" | "load" (default "networkidle2")
  */
 async function handleExtract(req, res) {
   const params = { ...req.query, ...req.body };
@@ -53,6 +60,8 @@ async function handleExtract(req, res) {
     waitFor = '0',
     timeout = '30000',
     cookie,
+    blockAssets = 'false',
+    waitUntil = 'networkidle2',
   } = params;
 
   if (!url) {
@@ -64,20 +73,33 @@ async function handleExtract(req, res) {
     const browser = await getBrowser();
 
     page = await browser.newPage();
+
+    // Realistic user agent
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     );
     await page.setViewport({ width: 1366, height: 900 });
-    await blockResources(page);
 
-    // If a cookie string is provided, apply it before navigating
+    // Extra stealth: override navigator properties
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+    });
+
+    // Conditionally block resources
+    if (blockAssets === 'true') {
+      await blockResources(page);
+    }
+
+    // Inject cookies BEFORE navigating so they're sent with the first request
     if (cookie) {
       const targetUrl = new URL(url);
       const cookiePairs = cookie.split(';').map((c) => c.trim()).filter(Boolean);
       const cookieObjects = cookiePairs.map((pair) => {
         const idx = pair.indexOf('=');
-        const name = pair.slice(0, idx);
-        const value = pair.slice(idx + 1);
+        const name = pair.slice(0, idx).trim();
+        const value = pair.slice(idx + 1).trim();
         return {
           name,
           value,
@@ -86,20 +108,25 @@ async function handleExtract(req, res) {
         };
       });
       await page.setCookie(...cookieObjects);
+      console.log(`Set ${cookieObjects.length} cookie(s) for ${new URL(url).hostname}`);
     }
 
-    console.log(`Navigating to: ${url}`);
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90000 });
+    console.log(`Navigating to: ${url} (waitUntil: ${waitUntil})`);
+    await page.goto(url, {
+      waitUntil: waitUntil,
+      timeout: 90000,
+    });
 
+    // Return full page HTML if mode is "html"
     if (mode === 'html') {
       const html = await page.content();
-      console.log(`Returned full HTML for: ${url}`);
+      console.log(`Returned full HTML (${html.length} chars) for: ${url}`);
       return res.json({ success: true, html });
     }
 
-    console.log(`Waiting for selector: ${selector}`);
+    console.log(`Waiting for selector: "${selector}" (timeout: ${timeout}ms)`);
     await page.waitForSelector(selector, { timeout: parseInt(timeout, 10) });
-    console.log(`Found selector: ${selector}`);
+    console.log(`Found selector: "${selector}"`);
 
     const extraWait = parseInt(waitFor, 10);
     if (extraWait > 0) {
@@ -119,7 +146,7 @@ async function handleExtract(req, res) {
     );
 
     if (result === null) {
-      console.log(`Selector "${selector}" not found on page: ${url}`);
+      console.log(`Selector "${selector}" found in DOM but returned null on: ${url}`);
       return res.status(404).json({
         success: false,
         error: `Selector "${selector}" not found on page`,
@@ -128,17 +155,25 @@ async function handleExtract(req, res) {
 
     console.log(`Extracted ${result.length} chars from "${selector}" on: ${url}`);
     return res.json({ success: true, selector, mode, data: result.trim() });
+
   } catch (err) {
     console.error(`Error extracting ${url}:`, err.message);
+
+    // Reset the browser on crash so the next request gets a fresh one
     if (browserPromise) {
-      const browser = await browserPromise;
-      await browser.close();
+      try {
+        const browser = await browserPromise;
+        await browser.close();
+      } catch (_) {
+        // already dead
+      }
     }
     browserPromise = null;
+
     return res.status(500).json({ success: false, error: err.message });
   } finally {
     try {
-      if (page) await page.close();
+      if (page && !page.isClosed()) await page.close();
     } catch (_) {
       // page already closed if browser was reset
     }
@@ -146,7 +181,7 @@ async function handleExtract(req, res) {
 }
 
 app.get('/', (req, res) => {
-  res.send('Taglist service is running!');
+  res.send('Taglist extraction service is running!');
 });
 
 app.get('/extract', handleExtract);
@@ -160,8 +195,10 @@ app.listen(PORT, () => {
 
 process.on('SIGINT', async () => {
   if (browserPromise) {
-    const browser = await browserPromise;
-    await browser.close();
+    try {
+      const browser = await browserPromise;
+      await browser.close();
+    } catch (_) {}
   }
   process.exit(0);
 });
